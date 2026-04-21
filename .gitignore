@@ -1,0 +1,10 @@
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile.generated
+*.o
+*.obj
+code
+build/
+*.db
+data_files/
