@@ -167,7 +167,8 @@ struct Train {
     int* prefixPrice;     // stationNum
     int* arriveMin;       // stationNum
     int* leaveMin;        // stationNum
-    int* seats;           // numDays*(stationNum-1)
+    int* seats;           // in-memory copy (not used in disk mode)
+    long long seatOffset; // byte offset into seats file
     int numDays() const { return saleEnd-saleStart+1; }
     int segmentsCount() const { return stationNum-1; }
     void allocArrays(){
@@ -185,7 +186,7 @@ struct Train {
         memset(prefixPrice, 0, sizeof(int)*stationNum);
         memset(arriveMin, 0, sizeof(int)*stationNum);
         memset(leaveMin, 0, sizeof(int)*stationNum);
-        seats=nullptr;
+        seats=nullptr; seatOffset=-1;
     }
     void freeArrays(){
         delete[] stations;
@@ -241,6 +242,47 @@ static Map<FixStr, Vector<StationEntry>> stationIndex;
 // Per train, per day: list of pending orders
 // use dynamic: trainIdx -> Vector<Vector<Pending>>
 static Vector<Vector<Vector<Pending>>> pendingLists;
+
+static FILE* seatsFile = nullptr;
+static long long seatsFileSize = 0;
+static const char* SEATS_FILE = "seats.bin";
+static void openSeatsFile(){
+    if (seatsFile) return;
+    seatsFile = fopen(SEATS_FILE, "r+b");
+    if (!seatsFile){
+        seatsFile = fopen(SEATS_FILE, "w+b");
+        seatsFileSize = 0;
+    } else {
+        fseek(seatsFile, 0, SEEK_END);
+        seatsFileSize = ftell(seatsFile);
+    }
+}
+// Read n ints from offset
+static void readSeats(long long off, int n, int* out){
+    fseek(seatsFile, off, SEEK_SET);
+    fread(out, sizeof(int), n, seatsFile);
+}
+static void writeSeats(long long off, int n, const int* data){
+    fseek(seatsFile, off, SEEK_SET);
+    fwrite(data, sizeof(int), n, seatsFile);
+    fflush(seatsFile);
+}
+// Allocate a new region at end of file and fill with seatNum
+static long long allocSeatsRegion(int n, int fillVal){
+    long long off = seatsFileSize;
+    fseek(seatsFile, off, SEEK_SET);
+    int buf[256];
+    for (int i=0;i<256;++i) buf[i]=fillVal;
+    int written=0;
+    while (written<n){
+        int chunk = n-written; if (chunk>256) chunk=256;
+        fwrite(buf, sizeof(int), chunk, seatsFile);
+        written += chunk;
+    }
+    fflush(seatsFile);
+    seatsFileSize += (long long)n * sizeof(int);
+    return off;
+}
 
 static int globalOrderSeq = 0;
 
@@ -459,8 +501,8 @@ static int cmd_release_train(const Cmd& c){
     if (t->released) return -1;
     t->released = true;
     int nd = t->numDays(); int seg = t->segmentsCount();
-    t->seats = new int[nd*seg];
-    for (int i=0;i<nd*seg;++i) t->seats[i]=t->seatNum;
+    openSeatsFile();
+    t->seatOffset = allocSeatsRegion(nd*seg, t->seatNum);
     // index stations
     for (int s=0;s<t->stationNum;++s){
         FixStr sk(t->stations[s]);
@@ -507,7 +549,7 @@ static int cmd_query_train(const Cmd& c, char* outbuf){
         if (s==t->stationNum-1){ strcpy(seatBuf,"x"); }
         else {
             if (!t->released) seat = t->seatNum;
-            else seat = t->seats[(day - t->saleStart)*t->segmentsCount() + s];
+            else { int tmp; readSeats(t->seatOffset + (long long)((day - t->saleStart)*t->segmentsCount() + s)*sizeof(int), 1, &tmp); seat = tmp; }
             sprintf(seatBuf,"%d",seat);
         }
         w += sprintf(w, "%s %s -> %s %d %s", t->stations[s], arr, lve, t->prefixPrice[s], seatBuf);
@@ -521,18 +563,28 @@ static int cmd_query_train(const Cmd& c, char* outbuf){
 static int minSeats(Train* t, int startDay, int fromIdx, int toIdx){
     int seg = t->segmentsCount();
     int base = (startDay - t->saleStart)*seg;
+    int n = toIdx-fromIdx;
+    int buf[128]; int* p = buf;
+    int* heap = nullptr;
+    if (n>128){ heap = new int[n]; p = heap; }
+    readSeats(t->seatOffset + (long long)(base+fromIdx)*sizeof(int), n, p);
     int mn = 0x7fffffff;
-    for (int i=fromIdx;i<toIdx;++i){
-        int s = t->seats[base+i];
-        if (s<mn) mn=s;
-    }
+    for (int i=0;i<n;++i) if (p[i]<mn) mn=p[i];
+    if (heap) delete[] heap;
     return mn;
 }
 
 static void applySeats(Train* t, int startDay, int fromIdx, int toIdx, int delta){
     int seg = t->segmentsCount();
     int base = (startDay - t->saleStart)*seg;
-    for (int i=fromIdx;i<toIdx;++i) t->seats[base+i] += delta;
+    int n = toIdx-fromIdx;
+    int buf[128]; int* p = buf;
+    int* heap = nullptr;
+    if (n>128){ heap = new int[n]; p = heap; }
+    readSeats(t->seatOffset + (long long)(base+fromIdx)*sizeof(int), n, p);
+    for (int i=0;i<n;++i) p[i] += delta;
+    writeSeats(t->seatOffset + (long long)(base+fromIdx)*sizeof(int), n, p);
+    if (heap) delete[] heap;
 }
 
 static int cmd_query_ticket(const Cmd& c, char* outbuf){
@@ -853,6 +905,9 @@ static int cmd_clean(){
     stationIndex.clear();
     pendingLists.clear();
     globalOrderSeq=0;
+    if (seatsFile){ fclose(seatsFile); seatsFile=nullptr; }
+    remove(SEATS_FILE);
+    seatsFileSize = 0;
     return 0;
 }
 
@@ -896,9 +951,7 @@ static void saveState(){
         fwrite(t->arriveMin, sizeof(int), t->stationNum, f);
         fwrite(t->leaveMin, sizeof(int), t->stationNum, f);
         if (t->released){
-            int total = t->numDays() * t->segmentsCount();
-            wI(f, total);
-            fwrite(t->seats, sizeof(int), total, f);
+            wLL(f, t->seatOffset);
         }
     }
     // orders
@@ -957,9 +1010,8 @@ static void loadState(){
         fread(t->arriveMin, sizeof(int), t->stationNum, f);
         fread(t->leaveMin, sizeof(int), t->stationNum, f);
         if (t->released){
-            int total = rI(f);
-            t->seats = new int[total];
-            fread(t->seats, sizeof(int), total, f);
+            t->seatOffset = rLL(f);
+            openSeatsFile();
             // rebuild station index
             for (int s=0;s<t->stationNum;++s){
                 FixStr sk(t->stations[s]);
@@ -1030,5 +1082,6 @@ int main(){
         else if (strcmp(c.name,"exit")==0){ printf("%s%sbye\n", ts, sp); break; }
     }
     saveState();
+    if (seatsFile){ fclose(seatsFile); seatsFile=nullptr; }
     return 0;
 }
