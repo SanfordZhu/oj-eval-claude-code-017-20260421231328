@@ -248,11 +248,23 @@ struct Cmd {
     void init(){ name[0]=0; for (int i=0;i<26;++i) args[i]=nullptr; }
 };
 
+static char g_timestamp[32];
+static bool g_hasTs = false;
 static bool parseCmd(char* line, Cmd& c){
     c.init();
+    g_hasTs = false;
     // skip whitespace
     char* p=line; while (*p==' '||*p=='\t') ++p;
     if (!*p||*p=='\n') return false;
+    // optional [timestamp]
+    if (*p=='['){
+        char* q=g_timestamp; *q++=*p++;
+        while (*p && *p!=']') *q++=*p++;
+        if (*p==']'){ *q++=*p++; }
+        *q=0;
+        g_hasTs=true;
+        while (*p==' '||*p=='\t') ++p;
+    }
     // get name
     char* q=c.name;
     while (*p && *p!=' '&&*p!='\t'&&*p!='\n'){ *q++=*p++; }
@@ -818,29 +830,28 @@ int main(){
     static char line[65536];
     static char out[1<<20];
     while (fgets(line, sizeof(line), stdin)){
-        // print timestamp prefix as required? No, README doesn't specify timestamp
         Cmd c;
         if (!parseCmd(line, c)) continue;
         if (c.name[0]==0) continue;
-        // README examples show outputs without [timestamp] prefix; many ticketing variants use [timestamp].
-        // But here: no timestamp in examples. Follow README.
+        const char* ts = g_hasTs ? g_timestamp : "";
+        const char* sp = g_hasTs ? " " : "";
         out[0]=0;
-        if (strcmp(c.name,"add_user")==0){ printf("%d\n", cmd_add_user(c)); }
-        else if (strcmp(c.name,"login")==0){ printf("%d\n", cmd_login(c)); }
-        else if (strcmp(c.name,"logout")==0){ printf("%d\n", cmd_logout(c)); }
-        else if (strcmp(c.name,"query_profile")==0){ int r=cmd_query_profile(c,out); if (r==0) printf("%s\n",out); else printf("-1\n"); }
-        else if (strcmp(c.name,"modify_profile")==0){ int r=cmd_modify_profile(c,out); if (r==0) printf("%s\n",out); else printf("-1\n"); }
-        else if (strcmp(c.name,"add_train")==0){ printf("%d\n", cmd_add_train(c)); }
-        else if (strcmp(c.name,"release_train")==0){ printf("%d\n", cmd_release_train(c)); }
-        else if (strcmp(c.name,"delete_train")==0){ printf("%d\n", cmd_delete_train(c)); }
-        else if (strcmp(c.name,"query_train")==0){ int r=cmd_query_train(c,out); if (r==0) printf("%s\n",out); else printf("-1\n"); }
-        else if (strcmp(c.name,"query_ticket")==0){ cmd_query_ticket(c,out); printf("%s\n",out); }
-        else if (strcmp(c.name,"query_transfer")==0){ int r=cmd_query_transfer(c,out); if (r==1) printf("%s\n",out); else printf("0\n"); }
-        else if (strcmp(c.name,"buy_ticket")==0){ int r=cmd_buy_ticket(c,out); if (r==0) printf("%s\n",out); else printf("-1\n"); }
-        else if (strcmp(c.name,"query_order")==0){ int r=cmd_query_order(c,out); if (r==0) printf("%s\n",out); else printf("-1\n"); }
-        else if (strcmp(c.name,"refund_ticket")==0){ printf("%d\n", cmd_refund_ticket(c)); }
-        else if (strcmp(c.name,"clean")==0){ printf("%d\n", cmd_clean()); }
-        else if (strcmp(c.name,"exit")==0){ printf("bye\n"); break; }
+        if (strcmp(c.name,"add_user")==0){ printf("%s%s%d\n", ts, sp, cmd_add_user(c)); }
+        else if (strcmp(c.name,"login")==0){ printf("%s%s%d\n", ts, sp, cmd_login(c)); }
+        else if (strcmp(c.name,"logout")==0){ printf("%s%s%d\n", ts, sp, cmd_logout(c)); }
+        else if (strcmp(c.name,"query_profile")==0){ int r=cmd_query_profile(c,out); if (r==0) printf("%s%s%s\n", ts, sp, out); else printf("%s%s-1\n", ts, sp); }
+        else if (strcmp(c.name,"modify_profile")==0){ int r=cmd_modify_profile(c,out); if (r==0) printf("%s%s%s\n", ts, sp, out); else printf("%s%s-1\n", ts, sp); }
+        else if (strcmp(c.name,"add_train")==0){ printf("%s%s%d\n", ts, sp, cmd_add_train(c)); }
+        else if (strcmp(c.name,"release_train")==0){ printf("%s%s%d\n", ts, sp, cmd_release_train(c)); }
+        else if (strcmp(c.name,"delete_train")==0){ printf("%s%s%d\n", ts, sp, cmd_delete_train(c)); }
+        else if (strcmp(c.name,"query_train")==0){ int r=cmd_query_train(c,out); if (r==0) printf("%s%s%s\n", ts, sp, out); else printf("%s%s-1\n", ts, sp); }
+        else if (strcmp(c.name,"query_ticket")==0){ cmd_query_ticket(c,out); printf("%s%s%s\n", ts, sp, out); }
+        else if (strcmp(c.name,"query_transfer")==0){ int r=cmd_query_transfer(c,out); if (r==1) printf("%s%s%s\n", ts, sp, out); else printf("%s%s0\n", ts, sp); }
+        else if (strcmp(c.name,"buy_ticket")==0){ int r=cmd_buy_ticket(c,out); if (r==0) printf("%s%s%s\n", ts, sp, out); else printf("%s%s-1\n", ts, sp); }
+        else if (strcmp(c.name,"query_order")==0){ int r=cmd_query_order(c,out); if (r==0) printf("%s%s%s\n", ts, sp, out); else printf("%s%s-1\n", ts, sp); }
+        else if (strcmp(c.name,"refund_ticket")==0){ printf("%s%s%d\n", ts, sp, cmd_refund_ticket(c)); }
+        else if (strcmp(c.name,"clean")==0){ printf("%s%s%d\n", ts, sp, cmd_clean()); }
+        else if (strcmp(c.name,"exit")==0){ printf("%s%sbye\n", ts, sp); break; }
     }
     return 0;
 }
