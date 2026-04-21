@@ -115,6 +115,8 @@ static int parseInt(const char* s){ int v=0,sign=1; if(*s=='-'){sign=-1;++s;} wh
 static const int daysBefore[] = {0,0,0,0,0,0,0,30,61,92}; // month 6 -> 0, 7->30, 8->61
 static int mmddToDay(const char* s){ // "mm-dd"
     int m=(s[0]-'0')*10+(s[1]-'0'); int d=(s[3]-'0')*10+(s[4]-'0');
+    if (m<6) return -10000 + m*31 + d; // out of range: ensures day < saleStart
+    if (m>8) return 10000 + m*31 + d;  // out of range: ensures day > saleEnd
     return daysBefore[m] + d - 1;
 }
 static int hhmmToMin(const char* s){ int h=(s[0]-'0')*10+(s[1]-'0'); int mi=(s[3]-'0')*10+(s[4]-'0'); return h*60+mi; }
@@ -153,7 +155,7 @@ struct Train {
     char trainID[24];
     int stationNum;
     int seatNum;
-    char stations[100][16]; // 10 chinese chars max = 30 bytes, keep 16? adjust
+    char stations[100][36]; // 10 Chinese chars = up to 30 bytes UTF-8 + null
     int prices[100];        // prices[i] = price station_i -> station_{i+1}; we store cumulative
     int startTime;          // minutes in day
     int travel[100];        // travel[i] = minutes between i and i+1
@@ -178,8 +180,8 @@ struct StationEntry { int trainIdx; int stationIdx; };
 struct Order {
     int status; // 0 success, 1 pending, 2 refunded
     char trainID[24];
-    char fromSt[16];
-    char toSt[16];
+    char fromSt[36];
+    char toSt[36];
     int fromIdx, toIdx;
     int trainIdx;
     int day;  // day offset for train start (so seats index)
@@ -386,7 +388,7 @@ static int cmd_add_train(const Cmd& c){
     {
         char buf[4096]; strncpy(buf, A(c,'s'), 4095); buf[4095]=0;
         char* parts[101]; int n = splitBy(buf, '|', parts, 101);
-        for (int k=0;k<n && k<t->stationNum;++k){ strncpy(t->stations[k], parts[k], 15); }
+        for (int k=0;k<n && k<t->stationNum;++k){ strncpy(t->stations[k], parts[k], 35); t->stations[k][35]=0; }
     }
     {
         char buf[4096]; strncpy(buf, A(c,'p'), 4095); buf[4095]=0;
@@ -724,8 +726,8 @@ static int cmd_buy_ticket(const Cmd& c, char* outbuf){
     int price = (t->prefixPrice[toIdx]-t->prefixPrice[fromIdx])*num;
     Order od; memset(&od,0,sizeof(od));
     od.trainIdx=*ti; strncpy(od.trainID, t->trainID, 23);
-    strncpy(od.fromSt, t->stations[fromIdx], 15);
-    strncpy(od.toSt, t->stations[toIdx], 15);
+    strncpy(od.fromSt, t->stations[fromIdx], 35); od.fromSt[35]=0;
+    strncpy(od.toSt, t->stations[toIdx], 35); od.toSt[35]=0;
     od.fromIdx=fromIdx; od.toIdx=toIdx; od.day=startDay; od.num=num;
     od.price = t->prefixPrice[toIdx]-t->prefixPrice[fromIdx];
     od.leaveAbs=(long long)startDay*1440+leaveMin;
@@ -825,8 +827,153 @@ static int cmd_clean(){
     return 0;
 }
 
+// ------------- Persistence -------------
+static const char* STATE_FILE = "state.bin";
+
+// Simple write helpers
+static void wI(FILE* f, int v){ fwrite(&v,sizeof(int),1,f); }
+static void wLL(FILE* f, long long v){ fwrite(&v,sizeof(long long),1,f); }
+static void wBytes(FILE* f, const void* p, int n){ fwrite(p,1,n,f); }
+static void wStr(FILE* f, const char* s){ int n=strlen(s); wI(f,n); fwrite(s,1,n,f); }
+static int rI(FILE* f){ int v; fread(&v,sizeof(int),1,f); return v; }
+static long long rLL(FILE* f){ long long v; fread(&v,sizeof(long long),1,f); return v; }
+static void rBytes(FILE* f, void* p, int n){ fread(p,1,n,f); }
+static void rStr(FILE* f, char* buf, int maxn){ int n=rI(f); if (n<maxn) { fread(buf,1,n,f); buf[n]=0; } else { fread(buf,1,maxn-1,f); buf[maxn-1]=0; fseek(f,n-(maxn-1),SEEK_CUR); } }
+
+static void saveState(){
+    FILE* f = fopen(STATE_FILE, "wb");
+    if (!f) return;
+    // users
+    wI(f, users.size());
+    for (int i=0;i<users.size();++i){ fwrite(&users[i], sizeof(User), 1, f); }
+    // trains
+    wI(f, trains.size());
+    for (int i=0;i<trains.size();++i){
+        Train* t = trains[i];
+        int alive = t?1:0;
+        wI(f, alive);
+        if (!t) continue;
+        fwrite(t->trainID, 24, 1, f);
+        wI(f, t->stationNum); wI(f, t->seatNum);
+        fwrite(t->stations, sizeof(t->stations), 1, f);
+        fwrite(t->prices, sizeof(t->prices), 1, f);
+        wI(f, t->startTime);
+        fwrite(t->travel, sizeof(t->travel), 1, f);
+        fwrite(t->stopover, sizeof(t->stopover), 1, f);
+        wI(f, t->saleStart); wI(f, t->saleEnd);
+        wI(f, (int)t->type);
+        wI(f, t->released?1:0);
+        fwrite(t->prefixPrice, sizeof(t->prefixPrice), 1, f);
+        fwrite(t->arriveMin, sizeof(t->arriveMin), 1, f);
+        fwrite(t->leaveMin, sizeof(t->leaveMin), 1, f);
+        if (t->released){
+            int total = t->numDays() * t->segmentsCount();
+            wI(f, total);
+            fwrite(t->seats, sizeof(int), total, f);
+        }
+    }
+    // orders
+    wI(f, allOrders.size());
+    for (int i=0;i<allOrders.size();++i){
+        wI(f, allOrders[i].size());
+        for (int j=0;j<allOrders[i].size();++j){
+            fwrite(&allOrders[i][j], sizeof(Order), 1, f);
+        }
+    }
+    // pending
+    wI(f, pendingLists.size());
+    for (int i=0;i<pendingLists.size();++i){
+        wI(f, pendingLists[i].size());
+        for (int j=0;j<pendingLists[i].size();++j){
+            wI(f, pendingLists[i][j].size());
+            for (int k=0;k<pendingLists[i][j].size();++k){
+                fwrite(&pendingLists[i][j][k], sizeof(Pending), 1, f);
+            }
+        }
+    }
+    wI(f, globalOrderSeq);
+    // logged-in users: not persisted (exit logs everyone out)
+    fclose(f);
+}
+
+static void loadState(){
+    FILE* f = fopen(STATE_FILE, "rb");
+    if (!f) return;
+    int n;
+    n = rI(f);
+    for (int i=0;i<n;++i){
+        User u; fread(&u, sizeof(User), 1, f);
+        users.push_back(u);
+        allOrders.push_back(Vector<Order>());
+        userMap.insert(FixStr(u.username), i);
+    }
+    n = rI(f);
+    for (int i=0;i<n;++i){
+        int alive = rI(f);
+        if (!alive){ trains.push_back(nullptr); pendingLists.push_back(Vector<Vector<Pending>>()); continue; }
+        Train* t = new Train();
+        memset(t,0,sizeof(Train));
+        fread(t->trainID, 24, 1, f);
+        t->stationNum = rI(f); t->seatNum = rI(f);
+        fread(t->stations, sizeof(t->stations), 1, f);
+        fread(t->prices, sizeof(t->prices), 1, f);
+        t->startTime = rI(f);
+        fread(t->travel, sizeof(t->travel), 1, f);
+        fread(t->stopover, sizeof(t->stopover), 1, f);
+        t->saleStart = rI(f); t->saleEnd = rI(f);
+        t->type = (char)rI(f);
+        t->released = rI(f)!=0;
+        fread(t->prefixPrice, sizeof(t->prefixPrice), 1, f);
+        fread(t->arriveMin, sizeof(t->arriveMin), 1, f);
+        fread(t->leaveMin, sizeof(t->leaveMin), 1, f);
+        t->seats = nullptr;
+        if (t->released){
+            int total = rI(f);
+            t->seats = new int[total];
+            fread(t->seats, sizeof(int), total, f);
+            // rebuild station index
+            for (int s=0;s<t->stationNum;++s){
+                FixStr sk(t->stations[s]);
+                Vector<StationEntry>* v = stationIndex.find(sk);
+                if (!v){ stationIndex.insert(sk, Vector<StationEntry>()); v=stationIndex.find(sk); }
+                StationEntry e; e.trainIdx=i; e.stationIdx=s;
+                v->push_back(e);
+            }
+        }
+        trains.push_back(t);
+        trainMap.insert(FixStr(t->trainID), i);
+        pendingLists.push_back(Vector<Vector<Pending>>());
+    }
+    int no = rI(f); // orders outer count = users
+    for (int i=0;i<no;++i){
+        int m = rI(f);
+        for (int j=0;j<m;++j){
+            Order o; fread(&o, sizeof(Order), 1, f);
+            allOrders[i].push_back(o);
+        }
+    }
+    int np = rI(f);
+    for (int i=0;i<np;++i){
+        int m = rI(f);
+        Vector<Vector<Pending>> pd;
+        for (int j=0;j<m;++j){
+            int k = rI(f);
+            Vector<Pending> pv;
+            for (int q=0;q<k;++q){
+                Pending p; fread(&p, sizeof(Pending), 1, f);
+                pv.push_back(p);
+            }
+            pd.push_back(pv);
+        }
+        pendingLists[i] = pd;
+    }
+    globalOrderSeq = rI(f);
+    fclose(f);
+}
+
 // ------------- Main -------------
 int main(){
+    loadState();
     static char line[65536];
     static char out[1<<20];
     while (fgets(line, sizeof(line), stdin)){
@@ -850,8 +997,9 @@ int main(){
         else if (strcmp(c.name,"buy_ticket")==0){ int r=cmd_buy_ticket(c,out); if (r==0) printf("%s%s%s\n", ts, sp, out); else printf("%s%s-1\n", ts, sp); }
         else if (strcmp(c.name,"query_order")==0){ int r=cmd_query_order(c,out); if (r==0) printf("%s%s%s\n", ts, sp, out); else printf("%s%s-1\n", ts, sp); }
         else if (strcmp(c.name,"refund_ticket")==0){ printf("%s%s%d\n", ts, sp, cmd_refund_ticket(c)); }
-        else if (strcmp(c.name,"clean")==0){ printf("%s%s%d\n", ts, sp, cmd_clean()); }
+        else if (strcmp(c.name,"clean")==0){ printf("%s%s%d\n", ts, sp, cmd_clean()); remove(STATE_FILE); }
         else if (strcmp(c.name,"exit")==0){ printf("%s%sbye\n", ts, sp); break; }
     }
+    saveState();
     return 0;
 }
