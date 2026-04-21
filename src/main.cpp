@@ -122,8 +122,8 @@ static int mmddToDay(const char* s){ // "mm-dd"
 static int hhmmToMin(const char* s){ int h=(s[0]-'0')*10+(s[1]-'0'); int mi=(s[3]-'0')*10+(s[4]-'0'); return h*60+mi; }
 static void dayToMMDD(int day, char* out){ // day offset since 06-01
     int m=6,d=day+1;
-    int md[]={0,0,0,0,0,0,30,31,31};
-    while (d>md[m]){ d-=md[m]; ++m; }
+    int md[]={0,0,0,0,0,0,30,31,31,30,31,30,31};
+    while (m<12 && d>md[m]){ d-=md[m]; ++m; }
     out[0]='0'+m/10; out[1]='0'+m%10; out[2]='-'; out[3]='0'+d/10; out[4]='0'+d%10; out[5]=0;
 }
 static void absMinToStr(long long mins, char* out){ // minutes since 2021-06-01 00:00
@@ -645,13 +645,15 @@ static int cmd_query_transfer(const Cmd& c, char* outbuf){
                 long long totalTime = arriveAbs2 - leaveAbs1;
                 int totalPrice = price1+price2;
                 bool better=false;
+                long long t1Ride = arriveAtM - leaveAbs1;
+                long long bestT1Ride = L1.arriveAbs - L1.leaveAbs;
                 if (!haveBest) better=true;
                 else {
                     if (byTime){
                         if (totalTime<bestTime) better=true;
                         else if (totalTime==bestTime){
-                            if (totalPrice<bestPrice) better=true;
-                            else if (totalPrice==bestPrice){
+                            if (t1Ride<bestT1Ride) better=true;
+                            else if (t1Ride==bestT1Ride){
                                 int cmp = strcmp(t1->trainID, bestTrain1);
                                 if (cmp<0) better=true;
                                 else if (cmp==0 && strcmp(t2->trainID, bestTrain2)<0) better=true;
@@ -660,8 +662,8 @@ static int cmd_query_transfer(const Cmd& c, char* outbuf){
                     } else {
                         if (totalPrice<bestPrice) better=true;
                         else if (totalPrice==bestPrice){
-                            if (totalTime<bestTime) better=true;
-                            else if (totalTime==bestTime){
+                            if (t1Ride<bestT1Ride) better=true;
+                            else if (t1Ride==bestT1Ride){
                                 int cmp = strcmp(t1->trainID, bestTrain1);
                                 if (cmp<0) better=true;
                                 else if (cmp==0 && strcmp(t2->trainID, bestTrain2)<0) better=true;
