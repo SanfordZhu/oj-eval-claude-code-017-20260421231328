@@ -155,22 +155,48 @@ struct Train {
     char trainID[24];
     int stationNum;
     int seatNum;
-    char stations[100][36]; // 10 Chinese chars = up to 30 bytes UTF-8 + null
-    int prices[100];        // prices[i] = price station_i -> station_{i+1}; we store cumulative
-    int startTime;          // minutes in day
-    int travel[100];        // travel[i] = minutes between i and i+1
-    int stopover[100];      // stopover[i] = stopover at i (1..n-2), stopover[0]=stopover[n-1]=0
-    int saleStart, saleEnd; // day offsets
+    // Dynamically allocated arrays sized to stationNum
+    char (*stations)[36]; // stationNum elements
+    int* prices;          // stationNum-1 elements
+    int startTime;        // minutes in day
+    int* travel;          // stationNum-1
+    int* stopover;        // stationNum-2 (or 0)
+    int saleStart, saleEnd;
     char type;
     bool released;
-    // prefix price and prefix time (arrive at station i from start in minutes)
-    int prefixPrice[100];
-    int arriveMin[100];     // absolute min-of-day from startTime=0 baseline (relative), arrival at station i
-    int leaveMin[100];      // leaving minute (relative)
-    // seats[day][segment] - dynamic: allocate when released
-    int* seats; // size = (saleEnd-saleStart+1) * (stationNum-1)
+    int* prefixPrice;     // stationNum
+    int* arriveMin;       // stationNum
+    int* leaveMin;        // stationNum
+    int* seats;           // numDays*(stationNum-1)
     int numDays() const { return saleEnd-saleStart+1; }
     int segmentsCount() const { return stationNum-1; }
+    void allocArrays(){
+        stations = new char[stationNum][36];
+        prices = new int[stationNum-1];
+        travel = new int[stationNum-1];
+        stopover = new int[stationNum>2?stationNum-2:1];
+        prefixPrice = new int[stationNum];
+        arriveMin = new int[stationNum];
+        leaveMin = new int[stationNum];
+        memset(stations, 0, stationNum*36);
+        memset(prices, 0, sizeof(int)*(stationNum-1));
+        memset(travel, 0, sizeof(int)*(stationNum-1));
+        if (stationNum>2) memset(stopover, 0, sizeof(int)*(stationNum-2));
+        memset(prefixPrice, 0, sizeof(int)*stationNum);
+        memset(arriveMin, 0, sizeof(int)*stationNum);
+        memset(leaveMin, 0, sizeof(int)*stationNum);
+        seats=nullptr;
+    }
+    void freeArrays(){
+        delete[] stations;
+        delete[] prices;
+        delete[] travel;
+        delete[] stopover;
+        delete[] prefixPrice;
+        delete[] arriveMin;
+        delete[] leaveMin;
+        if (seats) delete[] seats;
+    }
 };
 
 // Station -> list of (trainIdx, station index)
@@ -383,7 +409,7 @@ static int cmd_add_train(const Cmd& c){
     t->seatNum = parseInt(A(c,'m'));
     t->type = A(c,'y')?A(c,'y')[0]:' ';
     t->released = false;
-    t->seats = nullptr;
+    t->allocArrays();
     // parse stations
     {
         char buf[4096]; strncpy(buf, A(c,'s'), 4095); buf[4095]=0;
@@ -455,6 +481,7 @@ static int cmd_delete_train(const Cmd& c){
     FixStr k(i_);
     int* idx = trainMap.find(k); if (!idx) return -1;
     if (trains[*idx]->released) return -1;
+    trains[*idx]->freeArrays();
     delete trains[*idx]; trains[*idx]=nullptr;
     trainMap.erase(k);
     return 0;
@@ -821,7 +848,7 @@ static int cmd_clean(){
     // Clear everything
     userMap.clear(); users.clear(); allOrders.clear(); loggedIn.clear();
     trainMap.clear();
-    for (int i=0;i<trains.size();++i){ if (trains[i]){ if (trains[i]->seats) delete[] trains[i]->seats; delete trains[i]; } }
+    for (int i=0;i<trains.size();++i){ if (trains[i]){ trains[i]->freeArrays(); delete trains[i]; } }
     trains.clear();
     stationIndex.clear();
     pendingLists.clear();
@@ -857,17 +884,17 @@ static void saveState(){
         if (!t) continue;
         fwrite(t->trainID, 24, 1, f);
         wI(f, t->stationNum); wI(f, t->seatNum);
-        fwrite(t->stations, sizeof(t->stations), 1, f);
-        fwrite(t->prices, sizeof(t->prices), 1, f);
+        fwrite(t->stations, 36, t->stationNum, f);
+        fwrite(t->prices, sizeof(int), t->stationNum-1, f);
         wI(f, t->startTime);
-        fwrite(t->travel, sizeof(t->travel), 1, f);
-        fwrite(t->stopover, sizeof(t->stopover), 1, f);
+        fwrite(t->travel, sizeof(int), t->stationNum-1, f);
+        if (t->stationNum>2) fwrite(t->stopover, sizeof(int), t->stationNum-2, f);
         wI(f, t->saleStart); wI(f, t->saleEnd);
         wI(f, (int)t->type);
         wI(f, t->released?1:0);
-        fwrite(t->prefixPrice, sizeof(t->prefixPrice), 1, f);
-        fwrite(t->arriveMin, sizeof(t->arriveMin), 1, f);
-        fwrite(t->leaveMin, sizeof(t->leaveMin), 1, f);
+        fwrite(t->prefixPrice, sizeof(int), t->stationNum, f);
+        fwrite(t->arriveMin, sizeof(int), t->stationNum, f);
+        fwrite(t->leaveMin, sizeof(int), t->stationNum, f);
         if (t->released){
             int total = t->numDays() * t->segmentsCount();
             wI(f, total);
@@ -917,18 +944,18 @@ static void loadState(){
         memset(t,0,sizeof(Train));
         fread(t->trainID, 24, 1, f);
         t->stationNum = rI(f); t->seatNum = rI(f);
-        fread(t->stations, sizeof(t->stations), 1, f);
-        fread(t->prices, sizeof(t->prices), 1, f);
+        t->allocArrays();
+        fread(t->stations, 36, t->stationNum, f);
+        fread(t->prices, sizeof(int), t->stationNum-1, f);
         t->startTime = rI(f);
-        fread(t->travel, sizeof(t->travel), 1, f);
-        fread(t->stopover, sizeof(t->stopover), 1, f);
+        fread(t->travel, sizeof(int), t->stationNum-1, f);
+        if (t->stationNum>2) fread(t->stopover, sizeof(int), t->stationNum-2, f);
         t->saleStart = rI(f); t->saleEnd = rI(f);
         t->type = (char)rI(f);
         t->released = rI(f)!=0;
-        fread(t->prefixPrice, sizeof(t->prefixPrice), 1, f);
-        fread(t->arriveMin, sizeof(t->arriveMin), 1, f);
-        fread(t->leaveMin, sizeof(t->leaveMin), 1, f);
-        t->seats = nullptr;
+        fread(t->prefixPrice, sizeof(int), t->stationNum, f);
+        fread(t->arriveMin, sizeof(int), t->stationNum, f);
+        fread(t->leaveMin, sizeof(int), t->stationNum, f);
         if (t->released){
             int total = rI(f);
             t->seats = new int[total];
